@@ -467,8 +467,10 @@ class ActiveShiftCard extends StatelessWidget {
     if (summary == null) return;
     await api.request('PATCH', '/shifts/${shift['id']}', body: summary);
     if (!context.mounted) return;
+    final shiftForBreak = Map<String, dynamic>.from(shift);
+    shiftForBreak.addAll(summary);
     final result = await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => BreakGuidePage(api: api, shift: {...shift, ...summary}, breakType: breakType)),
+      MaterialPageRoute(builder: (_) => BreakGuidePage(api: api, shift: shiftForBreak, breakType: breakType)),
     );
     if (result != null) onChanged();
   }
@@ -976,7 +978,12 @@ class GeoPoint {
 
 Future<GeoPoint> currentLocation() async {
   final position = await html.window.navigator.geolocation.getCurrentPosition(enableHighAccuracy: true);
-  return GeoPoint(position.coords!.latitude!.toDouble(), position.coords!.longitude!.toDouble());
+  final latitude = position.coords?.latitude;
+  final longitude = position.coords?.longitude;
+  if (latitude == null || longitude == null) {
+    throw Exception('Location unavailable');
+  }
+  return GeoPoint(latitude.toDouble(), longitude.toDouble());
 }
 
 class WeeklyPage extends StatefulWidget {

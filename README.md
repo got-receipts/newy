@@ -70,6 +70,7 @@ JWT_SECRET=<strong random secret>
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=10080
 CORS_ORIGINS=https://your-railway-domain.up.railway.app
+SEED_DEMO_ACCOUNTS=false
 ```
 
 The root Dockerfile builds Flutter Web to `build/web`, copies it into the FastAPI image, runs migrations, and serves the PWA and API from the same Railway service. The healthcheck path is `/health`.

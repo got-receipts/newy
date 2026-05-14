@@ -1,6 +1,6 @@
 GigOS test accounts
 
-These accounts are seeded automatically when the backend starts:
+These accounts are available only when SEED_DEMO_ACCOUNTS=true is set:
 
 1. driver@gigos.test
    Password: GigOSdemo123!

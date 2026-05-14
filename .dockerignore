@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+postgres-data
+frontend/build
+frontend/.dart_tool
+frontend/pubspec.lock
+backend/.pytest_cache
+ipa
+gigOS
+*.ipa
+

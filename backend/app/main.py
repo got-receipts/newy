@@ -8,11 +8,12 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.database import SessionLocal
-from app.demo_seed import seed_demo_data
+from app.models import VehicleCatalog
 from app.models import User
 from app.routers import auth, locations, reports, shifts, vehicles
 from app.schemas import UserRead
 from app.security import get_current_user
+from app.vehicle_seed import catalog_rows
 
 DISCLAIMER = (
     "GigOS is an independent shift, mileage, break, and earnings tracker for gig workers. "
@@ -44,7 +45,13 @@ app.include_router(vehicles.router)
 def startup_seed() -> None:
     db = SessionLocal()
     try:
-        seed_demo_data(db)
+        if not db.query(VehicleCatalog.id).first():
+            db.add_all([VehicleCatalog(**row) for row in catalog_rows()])
+            db.commit()
+        if settings.seed_demo_accounts:
+            from app.demo_seed import seed_demo_data
+
+            seed_demo_data(db)
     finally:
         db.close()
 
