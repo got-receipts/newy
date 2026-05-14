@@ -1161,7 +1161,7 @@ class _VehicleSetupPageState extends State<VehicleSetupPage> {
     if (mounted) Navigator.of(context).pop(vehicle);
   }
 
-  Future<void> activate(Map<String, dynamic> vehicle) async {
+  Future<void> setVehicleActive(Map<String, dynamic> vehicle) async {
     final active = await widget.api.request('PATCH', '/vehicles/${vehicle['id']}/active') as Map<String, dynamic>;
     if (mounted) Navigator.of(context).pop(active);
   }
@@ -1187,7 +1187,7 @@ class _VehicleSetupPageState extends State<VehicleSetupPage> {
                       leading: Icon(vehicle['is_active'] == true ? Icons.check_circle : Icons.radio_button_unchecked, color: const Color(0xff32d583)),
                       title: Text('${vehicle['year']} ${vehicle['make']} ${vehicle['model']}'),
                       subtitle: Text('${vehicle['mpg_combined']} MPG combined - \$${vehicle['fuel_price_per_gallon']}/gal'),
-                      trailing: vehicle['is_active'] == true ? const Text('Active') : TextButton(onPressed: () => activate(vehicle), child: const Text('Use')),
+                      trailing: vehicle['is_active'] == true ? const Text('Active') : TextButton(onPressed: () => setVehicleActive(vehicle), child: const Text('Use')),
                     ),
                   );
                 }),
