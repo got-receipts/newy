@@ -251,14 +251,18 @@ def start_break(shift_id: int, payload: BreakStart, db: Session = Depends(get_db
     shift = shift_or_404(db, current_user.id, shift_id)
     if shift.ended_at is not None:
         raise HTTPException(status_code=409, detail="Cannot start a break on an ended shift")
+    now = now_utc()
     carry_minutes, carry_orders = carried_session_totals(db, shift)
-    minutes = total_minutes(shift.started_at, shift.ended_at, now_utc()) + carry_minutes
+    minutes = total_minutes(shift.started_at, shift.ended_at, now) + carry_minutes
     orders = shift.trips_since_break + carry_orders
-    required_break = bool(shift.break_required) or manual_followup_is_due(shift, now_utc())
+    manual_recovery_due = manual_followup_is_due(shift, now)
+    required_break = bool(shift.break_required) or manual_recovery_due
     if payload.break_type == "lunch" and minutes < 120 and orders < 20:
         raise HTTPException(status_code=409, detail="Lunch unlocks after 2 hours online or 20 completed orders in this carried session")
     if payload.break_type not in {"emergency", "lunch"} and minutes < 80 and not required_break:
         raise HTTPException(status_code=409, detail="Breaks unlock after 80 minutes online or once 5 completed orders require a break")
+    if manual_recovery_due and (payload.manual_override or payload.target_latitude is None or payload.target_longitude is None):
+        raise HTTPException(status_code=409, detail="Manual override recovery requires a confirmed 15 minute break at a break location")
     active_break = db.scalar(select(Break).where(Break.shift_id == shift_id, Break.ended_at.is_(None)))
     if active_break:
         raise HTTPException(status_code=409, detail="This shift already has an active break")
@@ -278,7 +282,7 @@ def start_break(shift_id: int, payload: BreakStart, db: Session = Depends(get_db
     if payload.manual_override and not payload.override_reason:
         raise HTTPException(status_code=400, detail="Manual override reason is required")
     if payload.manual_override:
-        if payload.break_type == "lunch":
+        if payload.break_type != "rest":
             raise HTTPException(status_code=409, detail="Manual override is only available for rest breaks")
         payload.notes = f"Manual override: {payload.override_reason}. {payload.notes or ''}".strip()
     if payload.tally_gross_earnings is not None:
@@ -343,6 +347,11 @@ def end_break(break_id: int, payload: BreakEnd, db: Session = Depends(get_db), c
     )
     if break_item is None:
         raise HTTPException(status_code=404, detail="Break not found")
+    planned_seconds = int(float(break_item.planned_minutes or STANDARD_BREAK_MINUTES) * 60)
+    elapsed_seconds = (now_utc() - as_utc(break_item.started_at)).total_seconds()
+    if break_item.ended_at is None and elapsed_seconds < planned_seconds:
+        remaining = int((planned_seconds - elapsed_seconds + 59) // 60)
+        raise HTTPException(status_code=409, detail=f"Break is locked for {remaining} more minute(s)")
     break_item.ended_at = payload.ended_at or now_utc()
     if payload.notes is not None:
         break_item.notes = payload.notes

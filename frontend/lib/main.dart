@@ -480,25 +480,30 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 }
 
-class ActiveShiftCard extends StatelessWidget {
+class ActiveShiftCard extends StatefulWidget {
   const ActiveShiftCard({super.key, required this.api, required this.shift, required this.vehicle, required this.onChanged});
   final ApiClient api;
   final Map<String, dynamic> shift;
   final Map<String, dynamic>? vehicle;
   final VoidCallback onChanged;
 
+  @override
+  State<ActiveShiftCard> createState() => _ActiveShiftCardState();
+}
+
+class _ActiveShiftCardState extends State<ActiveShiftCard> {
   bool get breakAllowed {
-    final status = shift['break_status'] as Map<String, dynamic>;
+    final status = widget.shift['break_status'] as Map<String, dynamic>;
     return status['break_allowed'] == true || status['break_required'] == true;
   }
 
   bool get breakRequired {
-    final status = shift['break_status'] as Map<String, dynamic>;
-    return status['break_required'] == true || shift['break_required'] == true;
+    final status = widget.shift['break_status'] as Map<String, dynamic>;
+    return status['break_required'] == true || widget.shift['break_required'] == true;
   }
 
   bool get lunchAllowed {
-    final status = shift['break_status'] as Map<String, dynamic>;
+    final status = widget.shift['break_status'] as Map<String, dynamic>;
     return status['lunch_allowed'] == true;
   }
 
@@ -534,8 +539,8 @@ class ActiveShiftCard extends StatelessWidget {
       if (confirmed != true) return;
     }
     try {
-      await api.request('POST', '/shifts/${shift['id']}/trips', body: {'count': count, 'multi_order': multiOrder});
-      onChanged();
+      await widget.api.request('POST', '/shifts/${widget.shift['id']}/trips', body: {'count': count, 'multi_order': multiOrder});
+      widget.onChanged();
     } catch (err) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
@@ -547,17 +552,17 @@ class ActiveShiftCard extends StatelessWidget {
     try {
       final summary = await showDialog<Map<String, dynamic>>(
         context: context,
-        builder: (_) => ShiftSummaryDialog(shift: shift),
+        builder: (_) => ShiftSummaryDialog(shift: widget.shift),
       );
       if (summary == null) return;
-      await api.request('PATCH', '/shifts/${shift['id']}', body: summary);
+      await widget.api.request('PATCH', '/shifts/${widget.shift['id']}', body: summary);
       if (!context.mounted) return;
-      final shiftForBreak = Map<String, dynamic>.from(shift);
+      final shiftForBreak = Map<String, dynamic>.from(widget.shift);
       shiftForBreak.addAll(summary);
       final result = await Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => BreakGuidePage(api: api, shift: shiftForBreak, breakType: breakType, summary: summary)),
+        MaterialPageRoute(builder: (_) => BreakGuidePage(api: widget.api, shift: shiftForBreak, breakType: breakType, summary: summary)),
       );
-      if (result != null) onChanged();
+      if (result != null) widget.onChanged();
     } catch (err) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
@@ -565,16 +570,23 @@ class ActiveShiftCard extends StatelessWidget {
     }
   }
 
-  Future<void> endBreak(int id) async {
-    await api.request('PATCH', '/breaks/$id/end', body: {});
-    onChanged();
+  Future<void> endBreak(BuildContext context, int id) async {
+    try {
+      await widget.api.request('PATCH', '/breaks/$id/end', body: {});
+      widget.onChanged();
+    } catch (err) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final breaks = shift['breaks'] as List<dynamic>;
+    final breaks = widget.shift['breaks'] as List<dynamic>;
     final activeBreak = breaks.cast<Map<String, dynamic>?>().firstWhere((item) => item?['ended_at'] == null, orElse: () => null);
-    final vehicleName = vehicle == null ? 'Vehicle ready' : '${vehicle!['year']} ${vehicle!['make']} ${vehicle!['model']}';
+    final vehicle = widget.vehicle;
+    final vehicleName = vehicle == null ? 'Vehicle ready' : '${vehicle['year']} ${vehicle['make']} ${vehicle['model']}';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -583,17 +595,18 @@ class ActiveShiftCard extends StatelessWidget {
           children: [
             Text('Active Shift', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
-            Text('${shift['platform']} - ${shift['metrics']['total_minutes']} minutes online'),
+            Text('${widget.shift['platform']} - ${widget.shift['metrics']['total_minutes']} minutes online'),
             Text(vehicleName, style: const TextStyle(color: Color(0xff98a2b3))),
             const SizedBox(height: 10),
-            Text(shift['break_status']['message'], style: const TextStyle(color: Color(0xfffdb022))),
+            Text(widget.shift['break_status']['message'], style: const TextStyle(color: Color(0xfffdb022))),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                FilledButton.icon(onPressed: () => completeTrip(context, multiOrder: false), icon: const Icon(Icons.add), label: Text('Trip ${shift['trips_since_break']}/5')),
+                FilledButton.icon(onPressed: () => completeTrip(context, multiOrder: false), icon: const Icon(Icons.add), label: Text('Trip ${widget.shift['trips_since_break']}/5')),
                 OutlinedButton.icon(onPressed: () => completeTrip(context, multiOrder: true), icon: const Icon(Icons.playlist_add), label: const Text('Multi-order')),
+                OutlinedButton.icon(onPressed: () => requestPwaNotifications(context), icon: const Icon(Icons.notifications_active_outlined), label: const Text('Enable alerts')),
               ],
             ),
             const SizedBox(height: 12),
@@ -608,14 +621,91 @@ class ActiveShiftCard extends StatelessWidget {
                 ],
               )
             else
-              OutlinedButton.icon(
-                onPressed: () => endBreak(activeBreak['id'] as int),
-                icon: const Icon(Icons.timer_off_outlined),
-                label: const Text('End Active Break'),
-              ),
+              ActiveBreakButton(breakItem: activeBreak, onEnd: () => endBreak(context, activeBreak['id'] as int)),
           ],
         ),
       ),
+    );
+  }
+}
+
+class ActiveBreakButton extends StatefulWidget {
+  const ActiveBreakButton({super.key, required this.breakItem, required this.onEnd});
+  final Map<String, dynamic> breakItem;
+  final Future<void> Function() onEnd;
+
+  @override
+  State<ActiveBreakButton> createState() => _ActiveBreakButtonState();
+}
+
+class _ActiveBreakButtonState extends State<ActiveBreakButton> {
+  Timer? ticker;
+  int remainingSeconds = 0;
+  bool notified = false;
+  int tipIndex = 0;
+  final tips = const [
+    'Bathroom, water, reset.',
+    'Coffee only if parked safely.',
+    'Check in with family.',
+    'Stretch before the next run.',
+    'Watch traffic and parking signs.',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    syncRemaining();
+    ticker = Timer.periodic(const Duration(seconds: 1), (_) => syncRemaining());
+  }
+
+  @override
+  void didUpdateWidget(covariant ActiveBreakButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.breakItem['id'] != widget.breakItem['id']) {
+      notified = false;
+      syncRemaining();
+    }
+  }
+
+  @override
+  void dispose() {
+    ticker?.cancel();
+    super.dispose();
+  }
+
+  void syncRemaining() {
+    final startedAt = DateTime.parse(widget.breakItem['started_at'] as String);
+    final plannedSeconds = (parse(widget.breakItem['planned_minutes']) * 60).round();
+    final endAt = startedAt.add(Duration(seconds: plannedSeconds > 0 ? plannedSeconds : 900));
+    final next = endAt.difference(DateTime.now()).inSeconds.clamp(0, 24 * 60 * 60).toInt();
+    if (!mounted) return;
+    setState(() {
+      remainingSeconds = next;
+      if (remainingSeconds % 18 == 0) tipIndex = (tipIndex + 1) % tips.length;
+    });
+    if (next == 0 && !notified) {
+      notified = true;
+      showPwaNotification('GigOS break complete', 'Your break timer is done. You can return to shift or end the active break.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final manual = widget.breakItem['manual_override'] == true;
+    final minutes = (remainingSeconds ~/ 60).toString().padLeft(2, '0');
+    final seconds = (remainingSeconds % 60).toString().padLeft(2, '0');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        OutlinedButton.icon(
+          onPressed: remainingSeconds == 0 ? widget.onEnd : null,
+          icon: Icon(remainingSeconds == 0 ? Icons.timer_off_outlined : Icons.lock_clock_outlined),
+          label: Text(remainingSeconds == 0 ? 'End Active Break' : 'Break locked $minutes:$seconds'),
+        ),
+        const SizedBox(height: 8),
+        Text(tips[tipIndex], style: const TextStyle(color: Color(0xff98a2b3))),
+        if (manual) const Text('Manual override recovery: next break must be a confirmed 15 minute break zone stop.', style: TextStyle(color: Color(0xfffdb022))),
+      ],
     );
   }
 }
@@ -1057,13 +1147,12 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
   Future<void> confirmBreak(Map<String, dynamic> zone) async {
     try {
       final here = await currentLocation();
-      final breakItem = await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: breakPayload(
+      await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: breakPayload(
         zone: zone,
         here: here,
         notes: 'Geo-confirmed break at ${zone['name']}',
-      )) as Map<String, dynamic>;
-      if (!mounted) return;
-      await showBreakCountdown(context, breakItem);
+      ));
+      showPwaNotification('GigOS break started', 'The active break button is locked until the countdown is done.');
       if (mounted) Navigator.of(context).pop(true);
     } catch (err) {
       if (mounted) {
@@ -1104,29 +1193,20 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
         here = await currentLocation();
       } catch (_) {}
       final zone = zones.isNotEmpty ? zones.first as Map<String, dynamic> : null;
-      final breakItem = await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: breakPayload(
+      await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: breakPayload(
         zone: zone,
         here: here,
         manual: true,
         reason: 'Driver reports designated break zone is unreachable or out of service area',
         notes: 'Manual override break. Driver acknowledged parking, traffic, and service-area warning.',
-      )) as Map<String, dynamic>;
-      if (!mounted) return;
-      await showBreakCountdown(context, breakItem);
+      ));
+      showPwaNotification('Manual break started', 'This is a 7.5 minute break. A confirmed 15 minute break will be required next.');
       if (mounted) Navigator.of(context).pop(true);
     } catch (err) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
       }
     }
-  }
-
-  Future<void> showBreakCountdown(BuildContext context, Map<String, dynamic> breakItem) {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => BreakCountdownDialog(breakItem: breakItem),
-    );
   }
 
   @override
@@ -1145,12 +1225,14 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
                 const SizedBox(height: 10),
                 ...zones.map((zone) => ZoneTile(zone: zone as Map<String, dynamic>, onConfirm: () => confirmBreak(zone))),
                 if (zones.isEmpty) const Text('No 24-hour gas stations found within the mandated search range. Pull over safely and refresh near a commercial road.'),
-                const SizedBox(height: 14),
-                OutlinedButton.icon(
-                  onPressed: manualOverride,
-                  icon: const Icon(Icons.warning_amber_rounded),
-                  label: const Text('Manual break override'),
-                ),
+                if (widget.breakType == 'rest') ...[
+                  const SizedBox(height: 14),
+                  OutlinedButton.icon(
+                    onPressed: manualOverride,
+                    icon: const Icon(Icons.warning_amber_rounded),
+                    label: const Text('Manual break override'),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 Text('Hot zone places', style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(height: 10),
@@ -1960,6 +2042,22 @@ double parse(dynamic value) => double.tryParse(value.toString()) ?? 0;
 double sumField(List<dynamic> items, String field) => items.fold(0, (sum, item) => sum + parse(item[field]));
 
 String money(dynamic value) => NumberFormat.simpleCurrency().format(parse(value));
+
+Future<void> requestPwaNotifications(BuildContext context) async {
+  if (!html.Notification.supported) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Notifications are not supported in this browser.')));
+    return;
+  }
+  final permission = await html.Notification.requestPermission();
+  if (!context.mounted) return;
+  final message = permission == 'granted' ? 'GigOS break alerts enabled.' : 'Notifications were not enabled.';
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+}
+
+void showPwaNotification(String title, String body) {
+  if (!html.Notification.supported || html.Notification.permission != 'granted') return;
+  html.Notification('$title: $body');
+}
 
 int durationMinutes(TextEditingController hours, TextEditingController minutes) {
   final hr = int.tryParse(hours.text) ?? 0;
