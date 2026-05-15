@@ -25,6 +25,8 @@ def upgrade() -> None:
         op.add_column("shifts", sa.Column("last_trip_at", sa.DateTime(timezone=True), nullable=True))
     if "break_required" not in columns:
         op.add_column("shifts", sa.Column("break_required", sa.Boolean(), nullable=False, server_default=sa.false()))
+    if "daily_minutes" not in columns:
+        op.add_column("shifts", sa.Column("daily_minutes", sa.Integer(), nullable=False, server_default="0"))
 
 
 def downgrade() -> None:
@@ -37,3 +39,5 @@ def downgrade() -> None:
         op.drop_column("shifts", "last_trip_at")
     if "trips_since_break" in columns:
         op.drop_column("shifts", "trips_since_break")
+    if "daily_minutes" in columns:
+        op.drop_column("shifts", "daily_minutes")

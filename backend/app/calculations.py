@@ -68,4 +68,5 @@ def break_status(minutes: int) -> dict[str, str | int]:
             "suggested_minutes": 15,
             "next_due_minutes": next_due,
         }
-    return {"level": "ok", "message": f"Next break check at {BREAK_INTERVAL_MINUTES} minutes online.", "suggested_minutes": 0, "next_due_minutes": BREAK_INTERVAL_MINUTES}
+    remaining = BREAK_INTERVAL_MINUTES - minutes
+    return {"level": "ready", "message": f"Keep stacking clean trips. Break cash-in unlocks in {remaining} min.", "suggested_minutes": 0, "next_due_minutes": BREAK_INTERVAL_MINUTES}

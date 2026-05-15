@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 
@@ -496,6 +497,11 @@ class ActiveShiftCard extends StatelessWidget {
     return status['break_required'] == true || shift['break_required'] == true;
   }
 
+  bool get lunchAllowed {
+    final status = shift['break_status'] as Map<String, dynamic>;
+    return status['lunch_allowed'] == true;
+  }
+
   Future<void> completeTrip(BuildContext context, {required bool multiOrder}) async {
     int count = 1;
     if (multiOrder) {
@@ -549,7 +555,7 @@ class ActiveShiftCard extends StatelessWidget {
       final shiftForBreak = Map<String, dynamic>.from(shift);
       shiftForBreak.addAll(summary);
       final result = await Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => BreakGuidePage(api: api, shift: shiftForBreak, breakType: breakType)),
+        MaterialPageRoute(builder: (_) => BreakGuidePage(api: api, shift: shiftForBreak, breakType: breakType, summary: summary)),
       );
       if (result != null) onChanged();
     } catch (err) {
@@ -597,7 +603,7 @@ class ActiveShiftCard extends StatelessWidget {
                 runSpacing: 8,
                 children: [
                   OutlinedButton.icon(onPressed: breakAllowed ? () => startBreak(context, 'rest') : null, icon: const Icon(Icons.free_breakfast_outlined), label: Text(breakRequired ? 'Required Break' : 'Start Break')),
-                  OutlinedButton.icon(onPressed: breakAllowed ? () => startBreak(context, 'lunch') : null, icon: const Icon(Icons.lunch_dining), label: const Text('Lunch')),
+                  OutlinedButton.icon(onPressed: lunchAllowed ? () => startBreak(context, 'lunch') : null, icon: const Icon(Icons.lunch_dining), label: const Text('Lunch')),
                   OutlinedButton.icon(onPressed: () => startBreak(context, 'emergency'), icon: const Icon(Icons.emergency_outlined), label: const Text('Emergency')),
                 ],
               )
@@ -791,9 +797,13 @@ class _ShiftFormPageState extends State<ShiftFormPage> {
   late final TextEditingController tips;
   late final TextEditingController trips;
   late final TextEditingController miles;
-  late final TextEditingController gas;
   late final TextEditingController other;
-  late final TextEditingController active;
+  late final TextEditingController onlineHours;
+  late final TextEditingController onlineMinutes;
+  late final TextEditingController activeHours;
+  late final TextEditingController activeMinutes;
+  late final TextEditingController dailyHours;
+  late final TextEditingController dailyMinutes;
   late final TextEditingController notes;
   bool busy = false;
 
@@ -805,9 +815,13 @@ class _ShiftFormPageState extends State<ShiftFormPage> {
     tips = controller('tips');
     trips = controller('trips');
     miles = controller('miles');
-    gas = controller('gas_cost');
     other = controller('other_expenses');
-    active = controller('active_minutes');
+    onlineHours = TextEditingController(text: splitHours(widget.shift?['metrics']?['total_minutes']));
+    onlineMinutes = TextEditingController(text: splitMinutes(widget.shift?['metrics']?['total_minutes']));
+    activeHours = TextEditingController(text: splitHours(widget.shift?['active_minutes']));
+    activeMinutes = TextEditingController(text: splitMinutes(widget.shift?['active_minutes']));
+    dailyHours = TextEditingController(text: splitHours(widget.shift?['daily_minutes']));
+    dailyMinutes = TextEditingController(text: splitMinutes(widget.shift?['daily_minutes']));
     notes = TextEditingController(text: widget.shift?['notes']?.toString() ?? '');
   }
 
@@ -819,28 +833,35 @@ class _ShiftFormPageState extends State<ShiftFormPage> {
     tips.dispose();
     trips.dispose();
     miles.dispose();
-    gas.dispose();
     other.dispose();
-    active.dispose();
+    onlineHours.dispose();
+    onlineMinutes.dispose();
+    activeHours.dispose();
+    activeMinutes.dispose();
+    dailyHours.dispose();
+    dailyMinutes.dispose();
     notes.dispose();
     super.dispose();
   }
 
   Future<void> save() async {
     setState(() => busy = true);
+    final onlineTotal = durationMinutes(onlineHours, onlineMinutes);
+    final activeTotal = durationMinutes(activeHours, activeMinutes);
+    final dailyTotal = durationMinutes(dailyHours, dailyMinutes);
     final body = {
       'platform': platform,
       'gross_earnings': parse(gross.text),
       'tips': parse(tips.text),
       'trips': int.tryParse(trips.text) ?? 0,
       'miles': parse(miles.text),
-      'gas_cost': parse(gas.text),
       'other_expenses': parse(other.text),
-      'active_minutes': int.tryParse(active.text) ?? 0,
+      'active_minutes': activeTotal,
+      'daily_minutes': dailyTotal,
       'notes': notes.text,
     };
     if (widget.shift == null) {
-      body['started_at'] = DateTime.now().subtract(const Duration(hours: 1)).toUtc().toIso8601String();
+      body['started_at'] = DateTime.now().subtract(Duration(minutes: onlineTotal <= 0 ? 60 : onlineTotal)).toUtc().toIso8601String();
       body['ended_at'] = DateTime.now().toUtc().toIso8601String();
       await widget.api.request('POST', '/shifts', body: body);
     } else {
@@ -869,9 +890,13 @@ class _ShiftFormPageState extends State<ShiftFormPage> {
           Field(controller: tips, label: 'Tips', icon: Icons.volunteer_activism_outlined),
           Field(controller: trips, label: 'Trips completed', icon: Icons.local_shipping_outlined),
           Field(controller: miles, label: 'Miles driven', icon: Icons.route_outlined),
-          Field(controller: gas, label: 'Gas cost', icon: Icons.local_gas_station_outlined),
           Field(controller: other, label: 'Other expenses', icon: Icons.receipt_long_outlined),
-          Field(controller: active, label: 'Active minutes', icon: Icons.timer_outlined),
+          const SizedBox(height: 14),
+          Text('Time from app screen', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          DurationEntry(label: 'Online / Dash time', hours: onlineHours, minutes: onlineMinutes),
+          DurationEntry(label: 'Active / Delivery time', hours: activeHours, minutes: activeMinutes),
+          DurationEntry(label: 'Daily total time', hours: dailyHours, minutes: dailyMinutes),
           const SizedBox(height: 12),
           TextField(controller: notes, maxLines: 3, decoration: const InputDecoration(labelText: 'Notes')),
           const SizedBox(height: 18),
@@ -923,6 +948,7 @@ class _ShiftSummaryDialogState extends State<ShiftSummaryDialog> {
   late final TextEditingController trips;
   late final TextEditingController miles;
   late final TextEditingController active;
+  late final TextEditingController daily;
 
   @override
   void initState() {
@@ -932,6 +958,7 @@ class _ShiftSummaryDialogState extends State<ShiftSummaryDialog> {
     trips = TextEditingController(text: widget.shift['trips']?.toString() ?? '0');
     miles = TextEditingController(text: widget.shift['miles']?.toString() ?? '0');
     active = TextEditingController(text: widget.shift['active_minutes']?.toString() ?? '0');
+    daily = TextEditingController(text: widget.shift['daily_minutes']?.toString() ?? '0');
   }
 
   @override
@@ -941,6 +968,7 @@ class _ShiftSummaryDialogState extends State<ShiftSummaryDialog> {
     trips.dispose();
     miles.dispose();
     active.dispose();
+    daily.dispose();
     super.dispose();
   }
 
@@ -957,6 +985,7 @@ class _ShiftSummaryDialogState extends State<ShiftSummaryDialog> {
             Field(controller: trips, label: 'Trips completed', icon: Icons.local_shipping_outlined),
             Field(controller: miles, label: 'Miles driven', icon: Icons.route_outlined),
             Field(controller: active, label: 'Active minutes', icon: Icons.timer_outlined),
+            Field(controller: daily, label: 'Daily online minutes', icon: Icons.watch_later_outlined),
           ],
         ),
       ),
@@ -970,6 +999,7 @@ class _ShiftSummaryDialogState extends State<ShiftSummaryDialog> {
             'trips': int.tryParse(trips.text) ?? 0,
             'miles': parse(miles.text),
             'active_minutes': int.tryParse(active.text) ?? 0,
+            'daily_minutes': int.tryParse(daily.text) ?? 0,
           }),
           child: const Text('Continue'),
         ),
@@ -979,10 +1009,11 @@ class _ShiftSummaryDialogState extends State<ShiftSummaryDialog> {
 }
 
 class BreakGuidePage extends StatefulWidget {
-  const BreakGuidePage({super.key, required this.api, required this.shift, required this.breakType});
+  const BreakGuidePage({super.key, required this.api, required this.shift, required this.breakType, required this.summary});
   final ApiClient api;
   final Map<String, dynamic> shift;
   final String breakType;
+  final Map<String, dynamic> summary;
 
   @override
   State<BreakGuidePage> createState() => _BreakGuidePageState();
@@ -1026,21 +1057,76 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
   Future<void> confirmBreak(Map<String, dynamic> zone) async {
     try {
       final here = await currentLocation();
-      await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: {
-        'break_type': widget.breakType,
-        'location_name': zone['name'],
-        'latitude': here.lat,
-        'longitude': here.lon,
-        'target_latitude': zone['latitude'],
-        'target_longitude': zone['longitude'],
-        'notes': 'Geo-confirmed break at ${zone['name']}',
-      });
+      final breakItem = await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: breakPayload(
+        zone: zone,
+        here: here,
+        notes: 'Geo-confirmed break at ${zone['name']}',
+      )) as Map<String, dynamic>;
+      if (!mounted) return;
+      await showBreakCountdown(context, breakItem);
       if (mounted) Navigator.of(context).pop(true);
     } catch (err) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
       }
     }
+  }
+
+  Map<String, dynamic> breakPayload({Map<String, dynamic>? zone, GeoPoint? here, bool manual = false, String? reason, String? notes}) {
+    return {
+      'break_type': widget.breakType,
+      'location_name': zone?['name'] ?? 'Manual safe stop',
+      if (here != null) 'latitude': here.lat,
+      if (here != null) 'longitude': here.lon,
+      if (zone != null) 'target_latitude': zone['latitude'],
+      if (zone != null) 'target_longitude': zone['longitude'],
+      'manual_override': manual,
+      if (reason != null) 'override_reason': reason,
+      'notes': notes ?? '',
+      'tally_gross_earnings': widget.summary['gross_earnings'],
+      'tally_tips': widget.summary['tips'],
+      'tally_trips': widget.summary['trips'],
+      'tally_miles': widget.summary['miles'],
+      'tally_active_minutes': widget.summary['active_minutes'],
+      'tally_daily_minutes': widget.summary['daily_minutes'],
+    };
+  }
+
+  Future<void> manualOverride() async {
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (_) => const ManualBreakOverrideDialog(),
+    );
+    if (proceed != true) return;
+    try {
+      GeoPoint? here;
+      try {
+        here = await currentLocation();
+      } catch (_) {}
+      final zone = zones.isNotEmpty ? zones.first as Map<String, dynamic> : null;
+      final breakItem = await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: breakPayload(
+        zone: zone,
+        here: here,
+        manual: true,
+        reason: 'Driver reports designated break zone is unreachable or out of service area',
+        notes: 'Manual override break. Driver acknowledged parking, traffic, and service-area warning.',
+      )) as Map<String, dynamic>;
+      if (!mounted) return;
+      await showBreakCountdown(context, breakItem);
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (err) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
+      }
+    }
+  }
+
+  Future<void> showBreakCountdown(BuildContext context, Map<String, dynamic> breakItem) {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => BreakCountdownDialog(breakItem: breakItem),
+    );
   }
 
   @override
@@ -1059,6 +1145,12 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
                 const SizedBox(height: 10),
                 ...zones.map((zone) => ZoneTile(zone: zone as Map<String, dynamic>, onConfirm: () => confirmBreak(zone))),
                 if (zones.isEmpty) const Text('No 24-hour gas stations found within the mandated search range. Pull over safely and refresh near a commercial road.'),
+                const SizedBox(height: 14),
+                OutlinedButton.icon(
+                  onPressed: manualOverride,
+                  icon: const Icon(Icons.warning_amber_rounded),
+                  label: const Text('Manual break override'),
+                ),
                 const SizedBox(height: 16),
                 Text('Hot zone places', style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(height: 10),
@@ -1067,6 +1159,171 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
             ),
     );
   }
+}
+
+class ManualBreakOverrideDialog extends StatefulWidget {
+  const ManualBreakOverrideDialog({super.key});
+
+  @override
+  State<ManualBreakOverrideDialog> createState() => _ManualBreakOverrideDialogState();
+}
+
+class _ManualBreakOverrideDialogState extends State<ManualBreakOverrideDialog> with SingleTickerProviderStateMixin {
+  late final AnimationController controller;
+
+  @override
+  void initState() {
+    super.initState();
+    controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 650))..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Manual override warning'),
+      content: FadeTransition(
+        opacity: Tween<double>(begin: 0.45, end: 1).animate(controller),
+        child: const Text(
+          'Only use manual override when the break zone is unreachable or you are out of service area. Abide by all traffic and parking signs. This creates a 7.5 minute break and requires another break within 45 minutes or after 3 deliveries.',
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('I understand')),
+      ],
+    );
+  }
+}
+
+class BreakCountdownDialog extends StatefulWidget {
+  const BreakCountdownDialog({super.key, required this.breakItem});
+  final Map<String, dynamic> breakItem;
+
+  @override
+  State<BreakCountdownDialog> createState() => _BreakCountdownDialogState();
+}
+
+class _BreakCountdownDialogState extends State<BreakCountdownDialog> with SingleTickerProviderStateMixin {
+  late final AnimationController controller;
+  Timer? ticker;
+  late int remainingSeconds;
+  int tipIndex = 0;
+  final tips = const [
+    'Use the bathroom before the next route.',
+    'Grab water or coffee if it is safe to park.',
+    'Call your family or send a quick check-in.',
+    'Stretch your legs and reset your focus.',
+    'Check parking signs before stepping away.',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    final plannedMinutes = parse(widget.breakItem['planned_minutes']);
+    remainingSeconds = ((plannedMinutes > 0 ? plannedMinutes : 15) * 60).round();
+    controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat();
+    ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        remainingSeconds = (remainingSeconds - 1).clamp(0, 24 * 60 * 60).toInt();
+        if (remainingSeconds % 18 == 0) tipIndex = (tipIndex + 1) % tips.length;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    ticker?.cancel();
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final manual = widget.breakItem['manual_override'] == true;
+    final minutes = (remainingSeconds ~/ 60).toString().padLeft(2, '0');
+    final seconds = (remainingSeconds % 60).toString().padLeft(2, '0');
+    return AlertDialog(
+      title: Text(manual ? 'Manual Recovery Break' : 'Break Timer'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedBuilder(
+              animation: controller,
+              builder: (_, __) => CustomPaint(
+                painter: BreakClockPainter(progress: controller.value, color: Theme.of(context).colorScheme.primary),
+                child: SizedBox(
+                  width: 180,
+                  height: 180,
+                  child: Center(
+                    child: Text('$minutes:$seconds', style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w900)),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 350),
+              child: Text(tips[tipIndex], key: ValueKey(tipIndex), textAlign: TextAlign.center, style: const TextStyle(fontSize: 16)),
+            ),
+            if (manual) ...[
+              const SizedBox(height: 12),
+              const Text('Follow-up break required within 45 minutes or after 3 deliveries.', textAlign: TextAlign.center, style: TextStyle(color: Color(0xfffdb022))),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: remainingSeconds == 0 ? () => Navigator.of(context).pop() : null,
+          child: const Text('Break complete'),
+        ),
+      ],
+    );
+  }
+}
+
+class BreakClockPainter extends CustomPainter {
+  BreakClockPainter({required this.progress, required this.color});
+  final double progress;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.shortestSide / 2 - 10;
+    final bg = Paint()
+      ..color = const Color(0xff26323b)
+      ..strokeWidth = 12
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final fg = Paint()
+      ..color = color
+      ..strokeWidth = 12
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    canvas.drawCircle(center, radius, bg);
+    canvas.drawArc(Rect.fromCircle(center: center, radius: radius), -1.57, progress * 6.28, false, fg);
+    final road = Paint()
+      ..color = Colors.white24
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    for (var i = 0; i < 4; i++) {
+      final y = center.dy + 28 + i * 14 - progress * 14;
+      canvas.drawLine(Offset(center.dx - 28, y), Offset(center.dx + 28, y), road);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant BreakClockPainter oldDelegate) => oldDelegate.progress != progress || oldDelegate.color != color;
 }
 
 class ZonesPage extends StatefulWidget {
@@ -1312,6 +1569,7 @@ class _WeeklyPageState extends State<WeeklyPage> {
                     MetricCard(label: 'Gross', value: money(data['gross_earnings']), icon: Icons.trending_up),
                     MetricCard(label: 'Net Hourly', value: money(data['net_hourly']), icon: Icons.payments_outlined),
                     MetricCard(label: 'Miles', value: parse(data['miles']).toStringAsFixed(1), icon: Icons.route_outlined),
+                    MetricCard(label: 'Gas Used', value: '${parse(data['gas_used_gallons']).toStringAsFixed(1)} gal', icon: Icons.local_gas_station_outlined),
                     MetricCard(label: 'Tax Set Aside', value: money(data['tax_set_aside']), icon: Icons.account_balance_outlined),
                   ],
                 ),
@@ -1319,7 +1577,9 @@ class _WeeklyPageState extends State<WeeklyPage> {
                 ReportRow('Shifts', data['shifts'].toString()),
                 ReportRow('Online hours', (data['online_minutes'] / 60).toStringAsFixed(1)),
                 ReportRow('Active hours', (data['active_minutes'] / 60).toStringAsFixed(1)),
+                ReportRow('Daily hours', (data['daily_minutes'] / 60).toStringAsFixed(1)),
                 ReportRow('Trips', data['trips'].toString()),
+                ReportRow('Gas used', '${parse(data['gas_used_gallons']).toStringAsFixed(2)} gal'),
                 ReportRow('Maintenance reserve', money(data['maintenance_reserve'])),
                 ReportRow('Net profit', money(data['net_profit'])),
                 const SizedBox(height: 18),
@@ -1633,6 +1893,29 @@ class Field extends StatelessWidget {
   }
 }
 
+class DurationEntry extends StatelessWidget {
+  const DurationEntry({super.key, required this.label, required this.hours, required this.minutes});
+  final String label;
+  final TextEditingController hours;
+  final TextEditingController minutes;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          Expanded(flex: 2, child: Text(label, style: const TextStyle(fontWeight: FontWeight.w700))),
+          const SizedBox(width: 10),
+          Expanded(child: TextField(controller: hours, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Hr'))),
+          const SizedBox(width: 8),
+          Expanded(child: TextField(controller: minutes, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Min'))),
+        ],
+      ),
+    );
+  }
+}
+
 class ReportRow extends StatelessWidget {
   const ReportRow(this.label, this.value, {super.key});
   final String label;
@@ -1677,3 +1960,13 @@ double parse(dynamic value) => double.tryParse(value.toString()) ?? 0;
 double sumField(List<dynamic> items, String field) => items.fold(0, (sum, item) => sum + parse(item[field]));
 
 String money(dynamic value) => NumberFormat.simpleCurrency().format(parse(value));
+
+int durationMinutes(TextEditingController hours, TextEditingController minutes) {
+  final hr = int.tryParse(hours.text) ?? 0;
+  final min = int.tryParse(minutes.text) ?? 0;
+  return hr * 60 + min;
+}
+
+String splitHours(dynamic minutes) => ((int.tryParse(minutes?.toString() ?? '0') ?? 0) ~/ 60).toString();
+
+String splitMinutes(dynamic minutes) => ((int.tryParse(minutes?.toString() ?? '0') ?? 0) % 60).toString();

@@ -39,10 +39,13 @@ class Shift(Base):
     trips_since_break: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_trip_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     break_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    manual_break_followup_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manual_break_followup_trips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     miles: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0.00"), nullable=False)
     gas_cost: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0.00"), nullable=False)
     other_expenses: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0.00"), nullable=False)
     active_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    daily_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
@@ -67,6 +70,9 @@ class Break(Base):
     latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
     longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manual_override: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    planned_minutes: Mapped[Decimal] = mapped_column(Numeric(4, 1), default=Decimal("15.0"), nullable=False)
+    target_distance_feet: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     shift: Mapped[Shift] = relationship(back_populates="breaks")
 

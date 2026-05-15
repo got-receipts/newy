@@ -95,6 +95,7 @@ class ShiftUpdate(BaseModel):
     gas_cost: Decimal | None = Field(default=None, ge=0)
     other_expenses: Decimal | None = Field(default=None, ge=0)
     active_minutes: int | None = Field(default=None, ge=0)
+    daily_minutes: int | None = Field(default=None, ge=0)
     notes: str | None = None
 
 
@@ -117,6 +118,14 @@ class BreakStart(BaseModel):
     longitude: Decimal | None = None
     target_latitude: Decimal | None = None
     target_longitude: Decimal | None = None
+    manual_override: bool = False
+    override_reason: str | None = None
+    tally_gross_earnings: Decimal | None = Field(default=None, ge=0)
+    tally_tips: Decimal | None = Field(default=None, ge=0)
+    tally_trips: int | None = Field(default=None, ge=0)
+    tally_miles: Decimal | None = Field(default=None, ge=0)
+    tally_active_minutes: int | None = Field(default=None, ge=0)
+    tally_daily_minutes: int | None = Field(default=None, ge=0)
 
 
 class BreakEnd(BaseModel):
@@ -135,6 +144,9 @@ class BreakRead(BaseModel):
     latitude: Decimal | None = None
     longitude: Decimal | None = None
     confirmed_at: datetime | None = None
+    manual_override: bool = False
+    planned_minutes: Decimal = Decimal("15.0")
+    target_distance_feet: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -155,7 +167,11 @@ class BreakStatus(BaseModel):
     suggested_minutes: int
     next_due_minutes: int | None = None
     break_allowed: bool = False
+    lunch_allowed: bool = False
     break_required: bool = False
+    manual_followup_due_at: datetime | None = None
+    manual_followup_trips: int = 0
+    manual_followup_trips_remaining: int | None = None
 
 
 class TripComplete(BaseModel):
@@ -176,10 +192,13 @@ class ShiftRead(BaseModel):
     trips_since_break: int = 0
     last_trip_at: datetime | None = None
     break_required: bool = False
+    manual_break_followup_due_at: datetime | None = None
+    manual_break_followup_trips: int = 0
     miles: Decimal
     gas_cost: Decimal
     other_expenses: Decimal
     active_minutes: int
+    daily_minutes: int = 0
     notes: str | None
     created_at: datetime
     updated_at: datetime
@@ -187,6 +206,7 @@ class ShiftRead(BaseModel):
     metrics: ShiftMetrics
     break_status: BreakStatus
     estimated_fuel_cost: Decimal | None = None
+    gas_used_gallons: Decimal | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -197,11 +217,13 @@ class WeeklyReport(BaseModel):
     shifts: int
     online_minutes: int
     active_minutes: int
+    daily_minutes: int
     gross_earnings: Decimal
     tips: Decimal
     trips: int
     miles: Decimal
     gas_cost: Decimal
+    gas_used_gallons: Decimal
     other_expenses: Decimal
     gross_hourly: Decimal
     net_hourly: Decimal

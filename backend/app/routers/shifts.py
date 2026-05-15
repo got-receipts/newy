@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import desc, select
@@ -14,6 +15,12 @@ from app.security import get_current_user
 router = APIRouter(tags=["shifts"])
 TRIP_COOLDOWN_SECONDS = 4 * 60
 TRIPS_BEFORE_MANDATED_BREAK = 5
+MANUAL_OVERRIDE_BREAK_MINUTES = Decimal("7.5")
+STANDARD_BREAK_MINUTES = Decimal("15.0")
+MANUAL_FOLLOWUP_MINUTES = 45
+MANUAL_FOLLOWUP_TRIPS = 3
+BREAK_ZONE_RADIUS_FEET = 400
+FEET_PER_MILE = 5280
 
 
 def now_utc() -> datetime:
@@ -31,8 +38,23 @@ def shift_or_404(db: Session, user_id: int, shift_id: int) -> Shift:
     return shift
 
 
+def gas_used_gallons(shift: Shift, vehicle: UserVehicle | None = None) -> Decimal | None:
+    if not shift.miles or shift.miles <= 0:
+        return None
+    mpg = vehicle.mpg_combined if vehicle is not None else None
+    if mpg is None or mpg <= 0:
+        return None
+    return (shift.miles / mpg).quantize(Decimal("0.01"))
+
+
+def manual_followup_is_due(shift: Shift, now: datetime) -> bool:
+    due_at = as_utc(shift.manual_break_followup_due_at)
+    return (due_at is not None and due_at <= now) or shift.manual_break_followup_trips >= MANUAL_FOLLOWUP_TRIPS
+
+
 def serialize_shift(shift: Shift) -> ShiftRead:
-    minutes = total_minutes(shift.started_at, shift.ended_at, now_utc())
+    now = now_utc()
+    minutes = total_minutes(shift.started_at, shift.ended_at, now)
     calc = metrics(
         started_at=shift.started_at,
         ended_at=shift.ended_at,
@@ -40,14 +62,29 @@ def serialize_shift(shift: Shift) -> ShiftRead:
         miles=shift.miles,
         gas_cost=shift.gas_cost,
         other_expenses=shift.other_expenses,
-        now=now_utc(),
+        now=now,
     )
     status_payload = break_status(minutes)
-    status_payload["break_allowed"] = minutes >= 80 or bool(shift.break_required)
-    status_payload["break_required"] = bool(shift.break_required)
-    if shift.break_required:
+    manual_due = manual_followup_is_due(shift, now)
+    has_required_break = bool(shift.break_required) or manual_due
+    status_payload["break_allowed"] = minutes >= 80 or has_required_break
+    status_payload["lunch_allowed"] = minutes >= 120 or shift.trips_since_break >= 20
+    status_payload["break_required"] = has_required_break
+    status_payload["manual_followup_due_at"] = shift.manual_break_followup_due_at
+    status_payload["manual_followup_trips"] = shift.manual_break_followup_trips
+    status_payload["manual_followup_trips_remaining"] = max(MANUAL_FOLLOWUP_TRIPS - shift.manual_break_followup_trips, 0)
+    if manual_due:
+        status_payload["level"] = "required"
+        status_payload["message"] = "Manual override recovery break required: stop at the closest safe break zone before taking more orders."
+    elif shift.break_required:
         status_payload["level"] = "required"
         status_payload["message"] = "Break required: 5 orders completed since your last break. Go to the closest safe 24-hour fuel stop."
+    elif shift.manual_break_followup_due_at is not None:
+        due_at = as_utc(shift.manual_break_followup_due_at)
+        remaining = max(int(((due_at or now) - now).total_seconds() // 60), 0)
+        trips_left = max(MANUAL_FOLLOWUP_TRIPS - shift.manual_break_followup_trips, 0)
+        status_payload["level"] = "manual recovery"
+        status_payload["message"] = f"Manual override recovery: take a real break in {remaining} minute(s) or after {trips_left} more delivery(s)."
     return ShiftRead(
         id=shift.id,
         user_id=shift.user_id,
@@ -61,10 +98,13 @@ def serialize_shift(shift: Shift) -> ShiftRead:
         trips_since_break=shift.trips_since_break,
         last_trip_at=shift.last_trip_at,
         break_required=shift.break_required,
+        manual_break_followup_due_at=shift.manual_break_followup_due_at,
+        manual_break_followup_trips=shift.manual_break_followup_trips,
         miles=shift.miles,
         gas_cost=shift.gas_cost,
         other_expenses=shift.other_expenses,
         active_minutes=shift.active_minutes,
+        daily_minutes=shift.daily_minutes,
         notes=shift.notes,
         created_at=shift.created_at,
         updated_at=shift.updated_at,
@@ -72,6 +112,7 @@ def serialize_shift(shift: Shift) -> ShiftRead:
         metrics=calc,
         break_status=status_payload,
         estimated_fuel_cost=shift.gas_cost,
+        gas_used_gallons=gas_used_gallons(shift, shift.vehicle),
     )
 
 
@@ -153,14 +194,32 @@ def get_shift(shift_id: int, db: Session = Depends(get_db), current_user: User =
     return serialize_shift(shift_or_404(db, current_user.id, shift_id))
 
 
+def carried_session_totals(db: Session, shift: Shift) -> tuple[int, int]:
+    window_start = shift.started_at - timedelta(hours=3)
+    previous_shifts = db.scalars(
+        select(Shift).where(
+            Shift.user_id == shift.user_id,
+            Shift.id != shift.id,
+            Shift.ended_at.is_not(None),
+            Shift.ended_at >= window_start,
+            Shift.ended_at <= shift.started_at,
+        )
+    ).all()
+    carry_minutes = sum(total_minutes(item.started_at, item.ended_at, now_utc()) for item in previous_shifts)
+    carry_orders = sum(item.trips_since_break for item in previous_shifts)
+    return carry_minutes, carry_orders
+
+
 @router.post("/shifts/{shift_id}/trips", response_model=ShiftRead)
 def complete_trip(shift_id: int, payload: TripComplete, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)) -> ShiftRead:
     shift = shift_or_404(db, current_user.id, shift_id)
     if shift.ended_at is not None:
         raise HTTPException(status_code=409, detail="Cannot add trips to an ended shift")
-    if shift.break_required:
-        raise HTTPException(status_code=409, detail="Break required before adding more completed trips")
     now = now_utc()
+    if shift.break_required or manual_followup_is_due(shift, now):
+        shift.break_required = True
+        db.commit()
+        raise HTTPException(status_code=409, detail="Break required before adding more completed trips")
     last_trip_at = as_utc(shift.last_trip_at)
     if not payload.multi_order and last_trip_at is not None:
         seconds_since_last = (now - last_trip_at).total_seconds()
@@ -169,8 +228,10 @@ def complete_trip(shift_id: int, payload: TripComplete, db: Session = Depends(ge
             raise HTTPException(status_code=429, detail=f"Trip cooldown active. Wait about {remaining} minute(s), or use multi-order if you completed multiple orders in one trip.")
     shift.trips += payload.count
     shift.trips_since_break += payload.count
+    if shift.manual_break_followup_due_at is not None:
+        shift.manual_break_followup_trips += payload.count
     shift.last_trip_at = now
-    if shift.trips_since_break >= TRIPS_BEFORE_MANDATED_BREAK:
+    if shift.trips_since_break >= TRIPS_BEFORE_MANDATED_BREAK or manual_followup_is_due(shift, now):
         shift.break_required = True
     shift.updated_at = now
     db.commit()
@@ -190,12 +251,18 @@ def start_break(shift_id: int, payload: BreakStart, db: Session = Depends(get_db
     shift = shift_or_404(db, current_user.id, shift_id)
     if shift.ended_at is not None:
         raise HTTPException(status_code=409, detail="Cannot start a break on an ended shift")
-    minutes = total_minutes(shift.started_at, shift.ended_at, now_utc())
-    if payload.break_type != "emergency" and minutes < 80 and not shift.break_required:
+    carry_minutes, carry_orders = carried_session_totals(db, shift)
+    minutes = total_minutes(shift.started_at, shift.ended_at, now_utc()) + carry_minutes
+    orders = shift.trips_since_break + carry_orders
+    required_break = bool(shift.break_required) or manual_followup_is_due(shift, now_utc())
+    if payload.break_type == "lunch" and minutes < 120 and orders < 20:
+        raise HTTPException(status_code=409, detail="Lunch unlocks after 2 hours online or 20 completed orders in this carried session")
+    if payload.break_type not in {"emergency", "lunch"} and minutes < 80 and not required_break:
         raise HTTPException(status_code=409, detail="Breaks unlock after 80 minutes online or once 5 completed orders require a break")
     active_break = db.scalar(select(Break).where(Break.shift_id == shift_id, Break.ended_at.is_(None)))
     if active_break:
         raise HTTPException(status_code=409, detail="This shift already has an active break")
+    distance_feet = None
     if payload.target_latitude is not None and payload.target_longitude is not None:
         if payload.latitude is None or payload.longitude is None:
             raise HTTPException(status_code=400, detail="Current location is required to confirm a break zone")
@@ -205,21 +272,49 @@ def start_break(shift_id: int, payload: BreakStart, db: Session = Depends(get_db
             float(payload.target_latitude),
             float(payload.target_longitude),
         )
-        if distance > 0.2:
-            raise HTTPException(status_code=409, detail="Arrive within 0.2 miles of the selected break zone to start the timer")
+        distance_feet = int(distance * FEET_PER_MILE)
+        if distance_feet > BREAK_ZONE_RADIUS_FEET and not payload.manual_override:
+            raise HTTPException(status_code=409, detail="Arrive within 400 feet of the selected break zone to start the timer, or use the manual override if you are out of service area.")
+    if payload.manual_override and not payload.override_reason:
+        raise HTTPException(status_code=400, detail="Manual override reason is required")
+    if payload.manual_override:
+        if payload.break_type == "lunch":
+            raise HTTPException(status_code=409, detail="Manual override is only available for rest breaks")
+        payload.notes = f"Manual override: {payload.override_reason}. {payload.notes or ''}".strip()
+    if payload.tally_gross_earnings is not None:
+        shift.gross_earnings = payload.tally_gross_earnings
+    if payload.tally_tips is not None:
+        shift.tips = payload.tally_tips
+    if payload.tally_trips is not None:
+        shift.trips = payload.tally_trips
+    if payload.tally_miles is not None:
+        shift.miles = payload.tally_miles
+    if payload.tally_active_minutes is not None:
+        shift.active_minutes = payload.tally_active_minutes
+    if payload.tally_daily_minutes is not None:
+        shift.daily_minutes = payload.tally_daily_minutes
     break_item = Break(
         shift_id=shift_id,
         started_at=now_utc() if payload.target_latitude is not None else payload.started_at or now_utc(),
         break_type=payload.break_type,
         notes=payload.notes,
         location_name=payload.location_name,
-        latitude=payload.latitude or payload.target_latitude,
-        longitude=payload.longitude or payload.target_longitude,
+        latitude=payload.latitude if payload.latitude is not None else payload.target_latitude,
+        longitude=payload.longitude if payload.longitude is not None else payload.target_longitude,
         confirmed_at=now_utc() if payload.target_latitude is not None else None,
+        manual_override=payload.manual_override,
+        planned_minutes=MANUAL_OVERRIDE_BREAK_MINUTES if payload.manual_override else STANDARD_BREAK_MINUTES,
+        target_distance_feet=distance_feet,
     )
     db.add(break_item)
     shift.break_required = False
     shift.trips_since_break = 0
+    if payload.manual_override:
+        shift.manual_break_followup_due_at = now_utc() + timedelta(minutes=MANUAL_FOLLOWUP_MINUTES)
+        shift.manual_break_followup_trips = 0
+    else:
+        shift.manual_break_followup_due_at = None
+        shift.manual_break_followup_trips = 0
     shift.updated_at = now_utc()
     db.commit()
     db.refresh(break_item)

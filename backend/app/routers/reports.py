@@ -6,7 +6,7 @@ from io import StringIO
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.calculations import money, metrics, total_minutes
 from app.database import get_db
@@ -32,7 +32,7 @@ def weekly_shifts(db: Session, user_id: int, start: datetime, end: datetime) -> 
                 Shift.user_id == user_id,
                 Shift.started_at >= start,
                 Shift.started_at < end,
-            )
+            ).options(selectinload(Shift.vehicle))
         )
     )
 
@@ -45,6 +45,7 @@ def weekly_report(db: Session = Depends(get_db), current_user: User = Depends(ge
     gross = sum((shift.gross_earnings for shift in shifts), Decimal("0.00"))
     miles = sum((shift.miles for shift in shifts), Decimal("0.00"))
     gas = sum((shift.gas_cost for shift in shifts), Decimal("0.00"))
+    gas_used = sum(((shift.miles / shift.vehicle.mpg_combined) for shift in shifts if shift.vehicle and shift.vehicle.mpg_combined and shift.miles), Decimal("0.00"))
     other = sum((shift.other_expenses for shift in shifts), Decimal("0.00"))
     aggregate = metrics(
         started_at=start,
@@ -60,11 +61,13 @@ def weekly_report(db: Session = Depends(get_db), current_user: User = Depends(ge
         shifts=len(shifts),
         online_minutes=online_minutes,
         active_minutes=sum(shift.active_minutes for shift in shifts),
+        daily_minutes=sum(shift.daily_minutes for shift in shifts),
         gross_earnings=money(gross),
         tips=money(sum((shift.tips for shift in shifts), Decimal("0.00"))),
         trips=sum(shift.trips for shift in shifts),
         miles=money(miles),
         gas_cost=money(gas),
+        gas_used_gallons=money(gas_used),
         other_expenses=money(other),
         gross_hourly=aggregate["gross_hourly"],
         net_hourly=aggregate["net_hourly"],
@@ -77,7 +80,7 @@ def weekly_report(db: Session = Depends(get_db), current_user: User = Depends(ge
 
 @router.get("/export/csv")
 def export_csv(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)) -> StreamingResponse:
-    shifts = list(db.scalars(select(Shift).where(Shift.user_id == current_user.id).order_by(Shift.started_at.desc())))
+    shifts = list(db.scalars(select(Shift).options(selectinload(Shift.vehicle)).where(Shift.user_id == current_user.id).order_by(Shift.started_at.desc())))
     buffer = StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
@@ -88,11 +91,13 @@ def export_csv(db: Session = Depends(get_db), current_user: User = Depends(get_c
             "platform",
             "online_minutes",
             "active_minutes",
+            "daily_minutes",
             "gross_earnings",
             "tips",
             "trips",
             "miles",
             "gas_cost",
+            "gas_used_gallons",
             "other_expenses",
             "tax_set_aside",
             "maintenance_reserve",
@@ -121,11 +126,13 @@ def export_csv(db: Session = Depends(get_db), current_user: User = Depends(get_c
                 shift.platform,
                 calc["total_minutes"],
                 shift.active_minutes,
+                shift.daily_minutes,
                 shift.gross_earnings,
                 shift.tips,
                 shift.trips,
                 shift.miles,
                 shift.gas_cost,
+                money((shift.miles / shift.vehicle.mpg_combined) if shift.vehicle and shift.vehicle.mpg_combined and shift.miles else Decimal("0.00")),
                 shift.other_expenses,
                 calc["tax_set_aside"],
                 calc["maintenance_reserve"],
@@ -142,4 +149,3 @@ def export_csv(db: Session = Depends(get_db), current_user: User = Depends(get_c
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=gigos-shifts.csv"},
     )
-
