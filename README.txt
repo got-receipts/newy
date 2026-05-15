@@ -2,11 +2,11 @@ GigOS test accounts
 
 These accounts are available only when SEED_DEMO_ACCOUNTS=true is set:
 
-1. driver@gigos.test
+1. driver@gigos.example.com
    Password: GigOSdemo123!
    Active vehicle: Demo Prius
 
-2. flex@gigos.test
+2. flex@gigos.example.com
    Password: GigOSdemo123!
    Active vehicle: Flex Maverick
 

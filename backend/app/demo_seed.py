@@ -8,8 +8,8 @@ from app.security import hash_password
 from app.vehicle_seed import catalog_rows
 
 TEST_ACCOUNTS = [
-    ("driver@gigos.test", "GigOSdemo123!", "Demo Prius", "Toyota", "Prius"),
-    ("flex@gigos.test", "GigOSdemo123!", "Flex Maverick", "Ford", "Maverick Hybrid"),
+    ("driver@gigos.example.com", "GigOSdemo123!", "Demo Prius", "Toyota", "Prius"),
+    ("flex@gigos.example.com", "GigOSdemo123!", "Flex Maverick", "Ford", "Maverick Hybrid"),
 ]
 
 
