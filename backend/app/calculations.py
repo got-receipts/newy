@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 TAX_RATE = Decimal("0.20")
@@ -10,11 +10,20 @@ def money(value: Decimal | float | int) -> Decimal:
     return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def total_minutes(started_at: datetime, ended_at: datetime | None, now: datetime | None = None) -> int:
-    end = ended_at or now
-    if end is None:
+    start = as_utc(started_at)
+    end = as_utc(ended_at) or as_utc(now)
+    if start is None or end is None:
         return 0
-    return max(int((end - started_at).total_seconds() // 60), 0)
+    return max(int((end - start).total_seconds() // 60), 0)
 
 
 def metrics(
