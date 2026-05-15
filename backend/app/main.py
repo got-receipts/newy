@@ -13,7 +13,7 @@ from app.models import User
 from app.routers import auth, locations, reports, shifts, vehicles
 from app.schemas import UserRead
 from app.security import get_current_user
-from app.vehicle_seed import catalog_rows
+from app.vehicle_seed import catalog_key, catalog_rows
 
 DISCLAIMER = (
     "GigOS is an independent shift, mileage, break, and earnings tracker for gig workers. "
@@ -45,8 +45,13 @@ app.include_router(vehicles.router)
 def startup_seed() -> None:
     db = SessionLocal()
     try:
-        if not db.query(VehicleCatalog.id).first():
-            db.add_all([VehicleCatalog(**row) for row in catalog_rows()])
+        existing = {
+            (year, make, model)
+            for year, make, model in db.query(VehicleCatalog.year, VehicleCatalog.make, VehicleCatalog.model).all()
+        }
+        missing_rows = [row for row in catalog_rows() if catalog_key(row) not in existing]
+        if missing_rows:
+            db.add_all([VehicleCatalog(**row) for row in missing_rows])
             db.commit()
         if settings.seed_demo_accounts:
             from app.demo_seed import seed_demo_data

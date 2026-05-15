@@ -10,6 +10,7 @@ from app.security import get_current_user
 router = APIRouter(prefix="/locations", tags=["locations"])
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+SEARCH_RADII_METERS = [5000, 12000, 25000, 50000]
 
 
 async def overpass(query: str) -> list[dict]:
@@ -19,6 +20,38 @@ async def overpass(query: str) -> list[dict]:
         return response.json().get("elements", [])
 
 
+def fallback_zone(lat: float, lon: float) -> dict:
+    return {
+        "name": "Closest commercial break search area",
+        "kind": "estimated",
+        "latitude": lat,
+        "longitude": lon,
+        "distance_miles": 0.0,
+        "open_24_7": False,
+        "opening_hours": "Unknown",
+        "note": "Live public POI data was unavailable here; use this as a search anchor and refresh near a commercial road.",
+    }
+
+
+def fallback_hotspots(lat: float, lon: float) -> list[dict]:
+    offsets = [
+        ("Nearby restaurant cluster search", 0.01, 0.0, 3),
+        ("Nearby retail corridor search", 0.0, 0.012, 2),
+        ("Nearby convenience/gas search", -0.01, -0.01, 2),
+    ]
+    return [
+        {
+            "latitude": round(lat + lat_offset, 5),
+            "longitude": round(lon + lon_offset, 5),
+            "score": score,
+            "distance_miles": round(miles_between(lat, lon, lat + lat_offset, lon + lon_offset), 2),
+            "label": label,
+            "estimated": True,
+        }
+        for label, lat_offset, lon_offset, score in offsets
+    ]
+
+
 @router.get("/break-zones")
 async def break_zones(
     lat: float = Query(ge=-90, le=90),
@@ -26,20 +59,25 @@ async def break_zones(
     radius_meters: int = Query(default=5000, ge=500, le=12000),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    query = f"""
-    [out:json][timeout:10];
-    (
-      node["amenity"="fuel"]["opening_hours"~"24/7"](around:{radius_meters},{lat},{lon});
-      way["amenity"="fuel"]["opening_hours"~"24/7"](around:{radius_meters},{lat},{lon});
-      node["shop"="convenience"]["opening_hours"~"24/7"](around:{radius_meters},{lat},{lon});
-      node["amenity"~"cafe|fast_food|restaurant"](around:{int(radius_meters / 2)},{lat},{lon});
-    );
-    out center tags 30;
-    """
-    try:
-        elements = await overpass(query)
-    except Exception:
-        elements = []
+    elements = []
+    search_radius = radius_meters
+    for search_radius in sorted({radius_meters, *SEARCH_RADII_METERS}):
+        query = f"""
+        [out:json][timeout:10];
+        (
+          node["amenity"="fuel"]["opening_hours"~"24/7"](around:{search_radius},{lat},{lon});
+          way["amenity"="fuel"]["opening_hours"~"24/7"](around:{search_radius},{lat},{lon});
+          node["shop"="convenience"]["opening_hours"~"24/7"](around:{search_radius},{lat},{lon});
+          node["amenity"~"cafe|fast_food|restaurant"](around:{max(2500, int(search_radius / 2))},{lat},{lon});
+        );
+        out center tags 50;
+        """
+        try:
+            elements = await overpass(query)
+        except Exception:
+            elements = []
+        if elements:
+            break
 
     zones = []
     for item in elements:
@@ -61,7 +99,9 @@ async def break_zones(
             }
         )
     zones.sort(key=lambda item: (not item["open_24_7"], item["distance_miles"]))
-    return {"source": "OpenStreetMap Overpass public POI data", "zones": zones[:12]}
+    if not zones:
+        zones = [fallback_zone(lat, lon)]
+    return {"source": "OpenStreetMap Overpass public POI data", "radius_meters": search_radius, "zones": zones[:12]}
 
 
 @router.get("/activity")
@@ -71,20 +111,25 @@ async def activity_hotspots(
     radius_meters: int = Query(default=4500, ge=500, le=12000),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    query = f"""
-    [out:json][timeout:10];
-    (
-      node["amenity"~"restaurant|fast_food|cafe|food_court"](around:{radius_meters},{lat},{lon});
-      node["shop"~"convenience|supermarket|mall"](around:{radius_meters},{lat},{lon});
-      way["amenity"~"restaurant|fast_food|cafe|food_court"](around:{radius_meters},{lat},{lon});
-      way["shop"~"convenience|supermarket|mall"](around:{radius_meters},{lat},{lon});
-    );
-    out center tags 100;
-    """
-    try:
-        elements = await overpass(query)
-    except Exception:
-        elements = []
+    elements = []
+    search_radius = radius_meters
+    for search_radius in sorted({radius_meters, *SEARCH_RADII_METERS}):
+        query = f"""
+        [out:json][timeout:10];
+        (
+          node["amenity"~"restaurant|fast_food|cafe|food_court"](around:{search_radius},{lat},{lon});
+          node["shop"~"convenience|supermarket|mall"](around:{search_radius},{lat},{lon});
+          way["amenity"~"restaurant|fast_food|cafe|food_court"](around:{search_radius},{lat},{lon});
+          way["shop"~"convenience|supermarket|mall"](around:{search_radius},{lat},{lon});
+        );
+        out center tags 150;
+        """
+        try:
+            elements = await overpass(query)
+        except Exception:
+            elements = []
+        if elements:
+            break
 
     buckets: dict[tuple[float, float], dict] = defaultdict(lambda: {"score": 0, "sample_names": []})
     for item in elements:
@@ -111,8 +156,10 @@ async def activity_hotspots(
             }
         )
     hotspots.sort(key=lambda item: (-item["score"], item["distance_miles"]))
+    if not hotspots:
+        hotspots = fallback_hotspots(lat, lon)
     return {
         "source": "OpenStreetMap POI density proxy, not gig-platform order data",
+        "radius_meters": search_radius,
         "hotspots": hotspots[:12],
     }
-

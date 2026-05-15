@@ -69,7 +69,13 @@ class ApiClient {
     if (response.statusCode >= 400) {
       String detail = 'Request failed';
       try {
-        detail = jsonDecode(response.body)['detail'].toString();
+        final decoded = jsonDecode(response.body);
+        final payload = decoded is Map<String, dynamic> ? decoded['detail'] : decoded;
+        if (payload is List && payload.isNotEmpty && payload.first is Map<String, dynamic>) {
+          detail = payload.first['msg']?.toString() ?? payload.toString();
+        } else {
+          detail = payload.toString();
+        }
       } catch (_) {}
       throw Exception(detail);
     }
@@ -306,6 +312,7 @@ class _DashboardPageState extends State<DashboardPage> {
   List<dynamic> shifts = [];
   Map<String, dynamic>? activeVehicle;
   bool loading = true;
+  bool shiftBusy = false;
   String? error;
 
   @override
@@ -340,20 +347,35 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<void> startShift() async {
-    if (activeVehicle == null) {
-      final vehicle = await Navigator.of(context).push<Map<String, dynamic>>(
-        MaterialPageRoute(builder: (_) => VehicleSetupPage(api: widget.api)),
+    setState(() {
+      shiftBusy = true;
+      error = null;
+    });
+    try {
+      if (activeVehicle == null) {
+        final vehicle = await Navigator.of(context).push<Map<String, dynamic>>(
+          MaterialPageRoute(builder: (_) => VehicleSetupPage(api: widget.api)),
+        );
+        if (vehicle == null) return;
+        setState(() => activeVehicle = vehicle);
+      }
+      if (!mounted) return;
+      final platform = await showModalBottomSheet<String>(
+        context: context,
+        builder: (context) => PlatformPicker(),
       );
-      if (vehicle == null) return;
-      activeVehicle = vehicle;
+      if (platform == null) return;
+      await widget.api.request('POST', '/shifts/start', body: {'platform': platform});
+      await load();
+      widget.onChanged();
+    } catch (err) {
+      if (mounted) {
+        setState(() => error = err.toString().replaceFirst('Exception: ', ''));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error ?? 'Could not start shift')));
+      }
+    } finally {
+      if (mounted) setState(() => shiftBusy = false);
     }
-    final platform = await showModalBottomSheet<String>(
-      context: context,
-      builder: (context) => PlatformPicker(),
-    );
-    if (platform == null) return;
-    await widget.api.request('POST', '/shifts/start', body: {'platform': platform});
-    widget.onChanged();
   }
 
   Future<void> endShift(Map<String, dynamic> shift) async {
@@ -399,14 +421,14 @@ class _DashboardPageState extends State<DashboardPage> {
               duration: const Duration(milliseconds: 280),
               child: FilledButton.icon(
                 key: ValueKey(active == null ? 'off' : 'on'),
-                onPressed: active == null ? startShift : () => endShift(active),
+                onPressed: shiftBusy ? null : active == null ? startShift : () => endShift(active),
                 icon: Icon(active == null ? Icons.play_arrow : Icons.stop),
                 style: FilledButton.styleFrom(
                   minimumSize: const Size.fromHeight(64),
                   backgroundColor: active == null ? const Color(0xff32d583) : const Color(0xfff97066),
                   foregroundColor: const Color(0xff101418),
                 ),
-                label: Text(active == null ? 'Start Shift' : 'Clock Out', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+                label: Text(shiftBusy ? 'Starting...' : active == null ? 'Start Shift' : 'Clock Out', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
               ),
             ),
             const SizedBox(height: 16),
@@ -460,19 +482,25 @@ class ActiveShiftCard extends StatelessWidget {
   final VoidCallback onChanged;
 
   Future<void> startBreak(BuildContext context, String breakType) async {
-    final summary = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (_) => ShiftSummaryDialog(shift: shift),
-    );
-    if (summary == null) return;
-    await api.request('PATCH', '/shifts/${shift['id']}', body: summary);
-    if (!context.mounted) return;
-    final shiftForBreak = Map<String, dynamic>.from(shift);
-    shiftForBreak.addAll(summary);
-    final result = await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => BreakGuidePage(api: api, shift: shiftForBreak, breakType: breakType)),
-    );
-    if (result != null) onChanged();
+    try {
+      final summary = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (_) => ShiftSummaryDialog(shift: shift),
+      );
+      if (summary == null) return;
+      await api.request('PATCH', '/shifts/${shift['id']}', body: summary);
+      if (!context.mounted) return;
+      final shiftForBreak = Map<String, dynamic>.from(shift);
+      shiftForBreak.addAll(summary);
+      final result = await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => BreakGuidePage(api: api, shift: shiftForBreak, breakType: breakType)),
+      );
+      if (result != null) onChanged();
+    } catch (err) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
+      }
+    }
   }
 
   Future<void> endBreak(int id) async {
@@ -764,17 +792,23 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
   }
 
   Future<void> confirmBreak(Map<String, dynamic> zone) async {
-    final here = await currentLocation();
-    await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: {
-      'break_type': widget.breakType,
-      'location_name': zone['name'],
-      'latitude': here.lat,
-      'longitude': here.lon,
-      'target_latitude': zone['latitude'],
-      'target_longitude': zone['longitude'],
-      'notes': 'Geo-confirmed break at ${zone['name']}',
-    });
-    if (mounted) Navigator.of(context).pop(true);
+    try {
+      final here = await currentLocation();
+      await widget.api.request('POST', '/shifts/${widget.shift['id']}/breaks/start', body: {
+        'break_type': widget.breakType,
+        'location_name': zone['name'],
+        'latitude': here.lat,
+        'longitude': here.lon,
+        'target_latitude': zone['latitude'],
+        'target_longitude': zone['longitude'],
+        'notes': 'Geo-confirmed break at ${zone['name']}',
+      });
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (err) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
+      }
+    }
   }
 
   @override
@@ -817,6 +851,12 @@ class _ZonesPageState extends State<ZonesPage> {
   List<dynamic> hotspots = [];
   bool loading = false;
   String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
 
   Future<void> load() async {
     setState(() {
@@ -877,38 +917,49 @@ class DataMap extends StatelessWidget {
     return AspectRatio(
       aspectRatio: 1.25,
       child: Card(
-        child: Stack(
-          children: [
-            Positioned.fill(child: CustomPaint(painter: MapGridPainter())),
-            const Center(child: Icon(Icons.navigation, color: Colors.white, size: 30)),
-            ...hotspots.take(10).map((item) => MapDot(origin: origin, item: item as Map<String, dynamic>, color: const Color(0x99fdb022), size: (18 + parse(item['score']).clamp(0, 16)).toDouble())),
-            ...zones.take(8).map((item) => MapDot(origin: origin, item: item as Map<String, dynamic>, color: const Color(0xff32d583), size: 14)),
-            const Positioned(left: 12, bottom: 12, child: Text('Open POI heat map', style: TextStyle(color: Color(0xff98a2b3)))),
-          ],
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return Stack(
+              clipBehavior: Clip.hardEdge,
+              children: [
+                Positioned.fill(child: CustomPaint(painter: MapGridPainter())),
+                const Center(child: Icon(Icons.navigation, color: Colors.white, size: 30)),
+                ...hotspots.take(10).map((item) => _mapDot(
+                      constraints: constraints,
+                      item: item as Map<String, dynamic>,
+                      color: const Color(0x99fdb022),
+                      size: (18 + parse(item['score']).clamp(0, 16)).toDouble(),
+                    )),
+                ...zones.take(8).map((item) => _mapDot(
+                      constraints: constraints,
+                      item: item as Map<String, dynamic>,
+                      color: const Color(0xff32d583),
+                      size: 14,
+                    )),
+                const Positioned(left: 12, bottom: 12, child: Text('Open POI heat map', style: TextStyle(color: Color(0xff98a2b3)))),
+              ],
+            );
+          },
         ),
       ),
     );
   }
-}
 
-class MapDot extends StatelessWidget {
-  const MapDot({super.key, required this.origin, required this.item, required this.color, required this.size});
-  final GeoPoint origin;
-  final Map<String, dynamic> item;
-  final Color color;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final width = MediaQuery.of(context).size.width - 64;
-    final height = (MediaQuery.of(context).size.width - 32) / 1.25 - 24;
+  Widget _mapDot({
+    required BoxConstraints constraints,
+    required Map<String, dynamic> item,
+    required Color color,
+    required double size,
+  }) {
+    final width = constraints.maxWidth;
+    final height = constraints.maxHeight;
     final latDelta = (parse(item['latitude']) - origin.lat).clamp(-0.025, 0.025).toDouble();
     final lonDelta = (parse(item['longitude']) - origin.lon).clamp(-0.025, 0.025).toDouble();
     final x = 0.5 + lonDelta / 0.05;
     final y = 0.5 - latDelta / 0.05;
     return Positioned(
-      left: x * width,
-      top: y * height,
+      left: (x * width - size / 2).clamp(6.0, width - size - 6).toDouble(),
+      top: (y * height - size / 2).clamp(6.0, height - size - 6).toDouble(),
       child: Tooltip(
         message: item['name']?.toString() ?? item['label']?.toString() ?? 'Map point',
         child: Container(width: size, height: size, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
@@ -1124,6 +1175,7 @@ class _VehicleSetupPageState extends State<VehicleSetupPage> {
   Map<String, dynamic>? selected;
   final fuelPrice = TextEditingController(text: '3.50');
   bool loading = true;
+  bool saving = false;
   String? error;
 
   @override
@@ -1152,18 +1204,35 @@ class _VehicleSetupPageState extends State<VehicleSetupPage> {
 
   Future<void> saveVehicle() async {
     if (selected == null) return;
-    final vehicle = await widget.api.request('POST', '/vehicles', body: {
-      'catalog_id': selected!['id'],
-      'nickname': '${selected!['make']} ${selected!['model']}',
-      'fuel_price_per_gallon': parse(fuelPrice.text),
-      'is_active': true,
-    }) as Map<String, dynamic>;
-    if (mounted) Navigator.of(context).pop(vehicle);
+    setState(() {
+      saving = true;
+      error = null;
+    });
+    try {
+      final vehicle = await widget.api.request('POST', '/vehicles', body: {
+        'catalog_id': selected!['id'],
+        'nickname': '${selected!['make']} ${selected!['model']}',
+        'fuel_price_per_gallon': parse(fuelPrice.text),
+        'is_active': true,
+      }) as Map<String, dynamic>;
+      if (mounted) Navigator.of(context).pop(vehicle);
+    } catch (err) {
+      if (mounted) {
+        setState(() => error = err.toString().replaceFirst('Exception: ', ''));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error ?? 'Could not save vehicle')));
+      }
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
   }
 
   Future<void> setVehicleActive(Map<String, dynamic> vehicle) async {
-    final active = await widget.api.request('PATCH', '/vehicles/${vehicle['id']}/active') as Map<String, dynamic>;
-    if (mounted) Navigator.of(context).pop(active);
+    try {
+      final active = await widget.api.request('PATCH', '/vehicles/${vehicle['id']}/active') as Map<String, dynamic>;
+      if (mounted) Navigator.of(context).pop(active);
+    } catch (err) {
+      if (mounted) setState(() => error = err.toString().replaceFirst('Exception: ', ''));
+    }
   }
 
   @override
@@ -1209,7 +1278,11 @@ class _VehicleSetupPageState extends State<VehicleSetupPage> {
                 const SizedBox(height: 12),
                 TextField(controller: fuelPrice, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Fuel price per gallon')),
                 const SizedBox(height: 18),
-                FilledButton.icon(onPressed: saveVehicle, icon: const Icon(Icons.directions_car), label: const Text('Save as Active Vehicle')),
+                FilledButton.icon(
+                  onPressed: saving ? null : saveVehicle,
+                  icon: const Icon(Icons.directions_car),
+                  label: Text(saving ? 'Saving...' : 'Save as Active Vehicle'),
+                ),
               ],
             ),
     );

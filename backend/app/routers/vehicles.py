@@ -8,16 +8,20 @@ from app.database import get_db
 from app.models import User, UserVehicle, VehicleCatalog
 from app.schemas import UserVehicleCreate, UserVehicleRead, VehicleCatalogRead
 from app.security import get_current_user
-from app.vehicle_seed import catalog_rows
+from app.vehicle_seed import catalog_key, catalog_rows
 
 router = APIRouter(prefix="/vehicles", tags=["vehicles"])
 
 
 def ensure_catalog(db: Session) -> None:
-    if db.scalar(select(VehicleCatalog.id).limit(1)):
-        return
-    db.add_all([VehicleCatalog(**row) for row in catalog_rows()])
-    db.commit()
+    existing = {
+        (year, make, model)
+        for year, make, model in db.query(VehicleCatalog.year, VehicleCatalog.make, VehicleCatalog.model).all()
+    }
+    missing_rows = [row for row in catalog_rows() if catalog_key(row) not in existing]
+    if missing_rows:
+        db.add_all([VehicleCatalog(**row) for row in missing_rows])
+        db.commit()
 
 
 @router.get("/catalog", response_model=list[VehicleCatalogRead])
@@ -91,4 +95,3 @@ def set_active_vehicle(vehicle_id: int, db: Session = Depends(get_db), current_u
     db.commit()
     db.refresh(vehicle)
     return vehicle
-
