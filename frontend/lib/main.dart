@@ -432,7 +432,11 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
             ),
             const SizedBox(height: 16),
-            if (active != null) ActiveShiftCard(api: widget.api, shift: active, onChanged: widget.onChanged),
+            if (active != null) ...[
+              DrivingOSPanel(shift: active, vehicle: activeVehicle),
+              const SizedBox(height: 12),
+              ActiveShiftCard(api: widget.api, shift: active, vehicle: activeVehicle, onChanged: widget.onChanged),
+            ],
             if (activeVehicle == null) ...[
               const SizedBox(height: 16),
               SetupPromptCard(
@@ -476,10 +480,62 @@ class _DashboardPageState extends State<DashboardPage> {
 }
 
 class ActiveShiftCard extends StatelessWidget {
-  const ActiveShiftCard({super.key, required this.api, required this.shift, required this.onChanged});
+  const ActiveShiftCard({super.key, required this.api, required this.shift, required this.vehicle, required this.onChanged});
   final ApiClient api;
   final Map<String, dynamic> shift;
+  final Map<String, dynamic>? vehicle;
   final VoidCallback onChanged;
+
+  bool get breakAllowed {
+    final status = shift['break_status'] as Map<String, dynamic>;
+    return status['break_allowed'] == true || status['break_required'] == true;
+  }
+
+  bool get breakRequired {
+    final status = shift['break_status'] as Map<String, dynamic>;
+    return status['break_required'] == true || shift['break_required'] == true;
+  }
+
+  Future<void> completeTrip(BuildContext context, {required bool multiOrder}) async {
+    int count = 1;
+    if (multiOrder) {
+      final picked = await showDialog<int>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Multi-order complete'),
+          content: const Text('Use this only when multiple orders were completed in one trip. This bypasses the hidden cooldown.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(2), child: const Text('2 orders')),
+            TextButton(onPressed: () => Navigator.of(context).pop(3), child: const Text('3 orders')),
+            FilledButton(onPressed: () => Navigator.of(context).pop(4), child: const Text('4+ orders')),
+          ],
+        ),
+      );
+      if (picked == null) return;
+      count = picked;
+    } else {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Trip completed?'),
+          content: const Text('Only tap the plus button after the order is fully completed. A hidden cooldown helps prevent accidental duplicate trips.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Add trip')),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    try {
+      await api.request('POST', '/shifts/${shift['id']}/trips', body: {'count': count, 'multi_order': multiOrder});
+      onChanged();
+    } catch (err) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err.toString().replaceFirst('Exception: ', ''))));
+      }
+    }
+  }
 
   Future<void> startBreak(BuildContext context, String breakType) async {
     try {
@@ -512,6 +568,7 @@ class ActiveShiftCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final breaks = shift['breaks'] as List<dynamic>;
     final activeBreak = breaks.cast<Map<String, dynamic>?>().firstWhere((item) => item?['ended_at'] == null, orElse: () => null);
+    final vehicleName = vehicle == null ? 'Vehicle ready' : '${vehicle!['year']} ${vehicle!['make']} ${vehicle!['model']}';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -521,16 +578,26 @@ class ActiveShiftCard extends StatelessWidget {
             Text('Active Shift', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
             Text('${shift['platform']} - ${shift['metrics']['total_minutes']} minutes online'),
+            Text(vehicleName, style: const TextStyle(color: Color(0xff98a2b3))),
             const SizedBox(height: 10),
             Text(shift['break_status']['message'], style: const TextStyle(color: Color(0xfffdb022))),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.icon(onPressed: () => completeTrip(context, multiOrder: false), icon: const Icon(Icons.add), label: Text('Trip ${shift['trips_since_break']}/5')),
+                OutlinedButton.icon(onPressed: () => completeTrip(context, multiOrder: true), icon: const Icon(Icons.playlist_add), label: const Text('Multi-order')),
+              ],
+            ),
             const SizedBox(height: 12),
             if (activeBreak == null)
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  OutlinedButton.icon(onPressed: () => startBreak(context, 'rest'), icon: const Icon(Icons.free_breakfast_outlined), label: const Text('Start Break')),
-                  OutlinedButton.icon(onPressed: () => startBreak(context, 'lunch'), icon: const Icon(Icons.lunch_dining), label: const Text('Lunch')),
+                  OutlinedButton.icon(onPressed: breakAllowed ? () => startBreak(context, 'rest') : null, icon: const Icon(Icons.free_breakfast_outlined), label: Text(breakRequired ? 'Required Break' : 'Start Break')),
+                  OutlinedButton.icon(onPressed: breakAllowed ? () => startBreak(context, 'lunch') : null, icon: const Icon(Icons.lunch_dining), label: const Text('Lunch')),
                   OutlinedButton.icon(onPressed: () => startBreak(context, 'emergency'), icon: const Icon(Icons.emergency_outlined), label: const Text('Emergency')),
                 ],
               )
@@ -542,6 +609,166 @@ class ActiveShiftCard extends StatelessWidget {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class DrivingOSPanel extends StatefulWidget {
+  const DrivingOSPanel({super.key, required this.shift, required this.vehicle});
+  final Map<String, dynamic> shift;
+  final Map<String, dynamic>? vehicle;
+
+  @override
+  State<DrivingOSPanel> createState() => _DrivingOSPanelState();
+}
+
+class _DrivingOSPanelState extends State<DrivingOSPanel> with SingleTickerProviderStateMixin {
+  late final AnimationController controller;
+
+  @override
+  void initState() {
+    super.initState();
+    controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1800))..repeat();
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final vehicleName = widget.vehicle == null ? 'Gig vehicle' : '${widget.vehicle!['make']} ${widget.vehicle!['model']}';
+    final trips = widget.shift['trips']?.toString() ?? '0';
+    return Card(
+      child: SizedBox(
+        height: 210,
+        child: AnimatedBuilder(
+          animation: controller,
+          builder: (context, _) {
+            return Stack(
+              children: [
+                Positioned.fill(child: CustomPaint(painter: DrivingScenePainter(progress: controller.value))),
+                Positioned(
+                  left: 18,
+                  top: 16,
+                  right: 18,
+                  child: Row(
+                    children: [
+                      const LogoBadge(),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(widget.shift['platform']?.toString() ?? 'On shift', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+                            Text(vehicleName, style: const TextStyle(color: Color(0xffc7d7c9))),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(color: const Color(0xff101418), borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xff32d583))),
+                        child: Text('$trips trips', style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xff32d583))),
+                      ),
+                    ],
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 34,
+                  child: Center(child: CarSilhouette(label: vehicleName)),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class DrivingScenePainter extends CustomPainter {
+  DrivingScenePainter({required this.progress});
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final sky = Paint()..shader = const LinearGradient(colors: [Color(0xff16242b), Color(0xff101418)]).createShader(Offset.zero & size);
+    canvas.drawRect(Offset.zero & size, sky);
+
+    final horizon = Paint()..color = const Color(0xff20333a);
+    canvas.drawPath(
+      Path()
+        ..moveTo(0, size.height * .54)
+        ..quadraticBezierTo(size.width * .35, size.height * .36, size.width, size.height * .50)
+        ..lineTo(size.width, size.height)
+        ..lineTo(0, size.height)
+        ..close(),
+      horizon,
+    );
+
+    final road = Paint()..color = const Color(0xff1b2026);
+    canvas.drawPath(
+      Path()
+        ..moveTo(size.width * .18, size.height)
+        ..lineTo(size.width * .42, size.height * .55)
+        ..lineTo(size.width * .58, size.height * .55)
+        ..lineTo(size.width * .82, size.height)
+        ..close(),
+      road,
+    );
+
+    final linePaint = Paint()
+      ..color = const Color(0xfffdb022)
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+    for (var i = 0; i < 7; i++) {
+      final y = size.height * .58 + ((i * 36 + progress * 60) % (size.height * .48));
+      final scale = (y - size.height * .55) / (size.height * .45);
+      final x = size.width / 2;
+      canvas.drawLine(Offset(x, y), Offset(x, y + 12 + scale * 22), linePaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant DrivingScenePainter oldDelegate) => oldDelegate.progress != progress;
+}
+
+class CarSilhouette extends StatelessWidget {
+  const CarSilhouette({super.key, required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 190,
+      height: 68,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Positioned(
+            bottom: 8,
+            child: Container(
+              width: 164,
+              height: 34,
+              decoration: BoxDecoration(color: const Color(0xff32d583), borderRadius: BorderRadius.circular(18)),
+            ),
+          ),
+          Positioned(
+            top: 6,
+            child: Container(
+              width: 92,
+              height: 34,
+              decoration: BoxDecoration(color: const Color(0xff1d252c), borderRadius: BorderRadius.circular(18), border: Border.all(color: const Color(0xff32d583), width: 3)),
+            ),
+          ),
+          const Positioned(left: 30, bottom: 0, child: Icon(Icons.circle, color: Color(0xff101418), size: 28)),
+          const Positioned(right: 30, bottom: 0, child: Icon(Icons.circle, color: Color(0xff101418), size: 28)),
+        ],
       ),
     );
   }
@@ -781,7 +1008,12 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
     });
     try {
       location = await currentLocation();
-      final breakData = await widget.api.request('GET', '/locations/break-zones?lat=${location!.lat}&lon=${location!.lon}') as Map<String, dynamic>;
+      final status = widget.shift['break_status'] as Map<String, dynamic>? ?? {};
+      final mandated = status['break_required'] == true || widget.shift['break_required'] == true;
+      final breakPath = mandated
+          ? '/locations/break-zones?lat=${location!.lat}&lon=${location!.lon}&mandated=true&include_fallback=false'
+          : '/locations/break-zones?lat=${location!.lat}&lon=${location!.lon}';
+      final breakData = await widget.api.request('GET', breakPath) as Map<String, dynamic>;
       final activityData = await widget.api.request('GET', '/locations/activity?lat=${location!.lat}&lon=${location!.lon}') as Map<String, dynamic>;
       zones = breakData['zones'] as List<dynamic>;
       hotspots = activityData['hotspots'] as List<dynamic>;
@@ -826,7 +1058,7 @@ class _BreakGuidePageState extends State<BreakGuidePage> {
                 Text('Closest break locations', style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(height: 10),
                 ...zones.map((zone) => ZoneTile(zone: zone as Map<String, dynamic>, onConfirm: () => confirmBreak(zone))),
-                if (zones.isEmpty) const Text('No 24-hour break locations found nearby. Try refreshing after moving closer to a commercial area.'),
+                if (zones.isEmpty) const Text('No 24-hour gas stations found within the mandated search range. Pull over safely and refresh near a commercial road.'),
                 const SizedBox(height: 16),
                 Text('Hot zone places', style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(height: 10),
@@ -997,8 +1229,11 @@ class ZoneTile extends StatelessWidget {
         leading: Icon(zone['open_24_7'] == true ? Icons.local_gas_station : Icons.place_outlined, color: const Color(0xff32d583)),
         title: Text(zone['name']?.toString() ?? 'Break location'),
         subtitle: Text('${zone['distance_miles']} mi - ${zone['kind']} ${zone['open_24_7'] == true ? '- 24/7' : ''}'),
-        trailing: onConfirm == null ? const Icon(Icons.chevron_right) : FilledButton(onPressed: onConfirm, child: const Text("I'm here")),
-        onTap: () => html.window.open('https://www.openstreetmap.org/?mlat=${zone['latitude']}&mlon=${zone['longitude']}#map=17/${zone['latitude']}/${zone['longitude']}', '_blank'),
+        trailing: onConfirm == null ? IconButton(
+          tooltip: 'Open map',
+          icon: const Icon(Icons.open_in_new),
+          onPressed: () => html.window.open('https://www.openstreetmap.org/?mlat=${zone['latitude']}&mlon=${zone['longitude']}#map=17/${zone['latitude']}/${zone['longitude']}', '_blank'),
+        ) : FilledButton(onPressed: onConfirm, child: const Text("I'm here")),
       ),
     );
   }

@@ -154,6 +154,13 @@ class BreakStatus(BaseModel):
     message: str
     suggested_minutes: int
     next_due_minutes: int | None = None
+    break_allowed: bool = False
+    break_required: bool = False
+
+
+class TripComplete(BaseModel):
+    count: int = Field(default=1, ge=1, le=10)
+    multi_order: bool = False
 
 
 class ShiftRead(BaseModel):
@@ -166,6 +173,9 @@ class ShiftRead(BaseModel):
     gross_earnings: Decimal
     tips: Decimal
     trips: int
+    trips_since_break: int = 0
+    last_trip_at: datetime | None = None
+    break_required: bool = False
     miles: Decimal
     gas_cost: Decimal
     other_expenses: Decimal

@@ -10,7 +10,10 @@ from app.security import get_current_user
 router = APIRouter(prefix="/locations", tags=["locations"])
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-SEARCH_RADII_METERS = [5000, 12000, 25000, 50000]
+METERS_PER_MILE = 1609.344
+GENERAL_BREAK_RADIUS_METERS = int(20 * METERS_PER_MILE)
+MANDATED_BREAK_RADII_METERS = [int(3 * METERS_PER_MILE), int(8 * METERS_PER_MILE)]
+SEARCH_RADII_METERS = [5000, 12000, 25000, GENERAL_BREAK_RADIUS_METERS]
 
 
 async def overpass(query: str) -> list[dict]:
@@ -22,14 +25,14 @@ async def overpass(query: str) -> list[dict]:
 
 def fallback_zone(lat: float, lon: float) -> dict:
     return {
-        "name": "Closest commercial break search area",
+        "name": "Closest 24-hour fuel stop search area",
         "kind": "estimated",
         "latitude": lat,
         "longitude": lon,
         "distance_miles": 0.0,
         "open_24_7": False,
         "opening_hours": "Unknown",
-        "note": "Live public POI data was unavailable here; use this as a search anchor and refresh near a commercial road.",
+        "note": "Live public 24-hour fuel data was unavailable here; use this as a search anchor and refresh near a commercial road.",
     }
 
 
@@ -56,21 +59,22 @@ def fallback_hotspots(lat: float, lon: float) -> list[dict]:
 async def break_zones(
     lat: float = Query(ge=-90, le=90),
     lon: float = Query(ge=-180, le=180),
-    radius_meters: int = Query(default=5000, ge=500, le=12000),
+    radius_meters: int = Query(default=GENERAL_BREAK_RADIUS_METERS, ge=500, le=50000),
+    mandated: bool = False,
+    include_fallback: bool = True,
     current_user: User = Depends(get_current_user),
 ) -> dict:
     elements = []
     search_radius = radius_meters
-    for search_radius in sorted({radius_meters, *SEARCH_RADII_METERS}):
+    radii = MANDATED_BREAK_RADII_METERS if mandated else sorted({radius_meters, *SEARCH_RADII_METERS})
+    for search_radius in radii:
         query = f"""
         [out:json][timeout:10];
         (
-          node["amenity"="fuel"]["opening_hours"~"24/7"](around:{search_radius},{lat},{lon});
-          way["amenity"="fuel"]["opening_hours"~"24/7"](around:{search_radius},{lat},{lon});
-          node["shop"="convenience"]["opening_hours"~"24/7"](around:{search_radius},{lat},{lon});
-          node["amenity"~"cafe|fast_food|restaurant"](around:{max(2500, int(search_radius / 2))},{lat},{lon});
+          node["amenity"="fuel"](around:{search_radius},{lat},{lon});
+          way["amenity"="fuel"](around:{search_radius},{lat},{lon});
         );
-        out center tags 50;
+        out center tags 80;
         """
         try:
             elements = await overpass(query)
@@ -94,12 +98,43 @@ async def break_zones(
                 "latitude": float(item_lat),
                 "longitude": float(item_lon),
                 "distance_miles": round(distance, 2),
-                "open_24_7": tags.get("opening_hours") == "24/7",
+                "open_24_7": "24/7" in (tags.get("opening_hours") or ""),
                 "opening_hours": tags.get("opening_hours"),
             }
         )
     zones.sort(key=lambda item: (not item["open_24_7"], item["distance_miles"]))
-    if not zones:
+    if not zones and not mandated:
+        query = f"""
+        [out:json][timeout:10];
+        (
+          node["shop"="convenience"]["opening_hours"~"24/7"](around:{radius_meters},{lat},{lon});
+          way["shop"="convenience"]["opening_hours"~"24/7"](around:{radius_meters},{lat},{lon});
+        );
+        out center tags 60;
+        """
+        try:
+            elements = await overpass(query)
+        except Exception:
+            elements = []
+        for item in elements:
+            tags = item.get("tags", {})
+            item_lat = item.get("lat") or item.get("center", {}).get("lat")
+            item_lon = item.get("lon") or item.get("center", {}).get("lon")
+            if item_lat is None or item_lon is None:
+                continue
+            zones.append(
+                {
+                    "name": tags.get("name") or tags.get("brand") or "24-hour convenience stop",
+                    "kind": tags.get("shop") or "convenience",
+                    "latitude": float(item_lat),
+                    "longitude": float(item_lon),
+                    "distance_miles": round(miles_between(lat, lon, float(item_lat), float(item_lon)), 2),
+                    "open_24_7": "24/7" in (tags.get("opening_hours") or ""),
+                    "opening_hours": tags.get("opening_hours"),
+                }
+            )
+        zones.sort(key=lambda item: item["distance_miles"])
+    if not zones and include_fallback:
         zones = [fallback_zone(lat, lon)]
     return {"source": "OpenStreetMap Overpass public POI data", "radius_meters": search_radius, "zones": zones[:12]}
 
